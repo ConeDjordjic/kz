@@ -58,11 +58,23 @@ def corpus(d, count=500):
             for _ in range(r.randint(2000, 8000)):
                 f.write(' '.join(r.choices(words, k=r.randint(6, 18))) + '\n')
 
+def mb(name, default):
+    """Corpus sizes are overridable so CI can generate a small one."""
+    return int(os.environ.get(name, default))
+
 if __name__ == '__main__':
+    ascii_bytes = mb('KZ_ASCII_BYTES', 1_000_000_000)
+    utf8_bytes = mb('KZ_UTF8_BYTES', 500_000_000)
+    corpus_files = mb('KZ_CORPUS_FILES', 500)
+
     os.makedirs(OUT, exist_ok=True)
-    print('generating big-ascii.txt (~1GB)...'); big_ascii(f'{OUT}/big-ascii.txt')
-    print('generating big-utf8.txt (~500MB)...'); big_utf8(f'{OUT}/big-utf8.txt')
-    print('generating corpus/ (500 files, ~218MB)...'); corpus(f'{OUT}/corpus')
+    print(f'generating big-ascii.txt ({ascii_bytes:,} bytes)...')
+    big_ascii(f'{OUT}/big-ascii.txt', ascii_bytes)
+    print(f'generating big-utf8.txt ({utf8_bytes:,} bytes)...')
+    big_utf8(f'{OUT}/big-utf8.txt', utf8_bytes)
+    if corpus_files:
+        print(f'generating corpus/ ({corpus_files} files)...')
+        corpus(f'{OUT}/corpus', corpus_files)
     with open(f'{OUT}/big-ascii.txt','rb') as s, open(f'{OUT}/small.txt','wb') as d:
         d.write(s.read(4096))
     print('done ->', OUT)

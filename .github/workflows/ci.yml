@@ -57,3 +57,27 @@ jobs:
 
       - name: Clippy
         run: cargo clippy -- -D warnings
+
+  wc-agreement:
+    name: Agreement with GNU wc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Generate corpora
+        env:
+          KZ_ASCII_BYTES: 8000000
+          KZ_UTF8_BYTES: 8000000
+          KZ_CORPUS_FILES: 0
+        run: python3 bench/gen_data.py bench/data
+
+      - name: Compare every count against wc
+        env:
+          LC_ALL: C.UTF-8
+        run: ./bench/verify.sh
