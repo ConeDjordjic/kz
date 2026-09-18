@@ -1,0 +1,42 @@
+[package]
+name = "kz-cli"
+version = "0.1.0"
+edition = "2024"
+authors = ["ConeDjordjic"]
+description = "Fast wc replacement"
+license = "MIT"
+readme = "README.md"
+keywords = ["wc", "word-count", "cli", "parallel", "fast"]
+categories = ["command-line-utilities", "text-processing"]
+repository = "https://github.com/ConeDjordjic/kz"
+homepage = "https://github.com/ConeDjordjic/kz"
+exclude = ["*.txt", "test.sh"]
+
+[[bin]]
+name = "kz"
+path = "src/main.rs"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[dependencies]
+atty = "0.2.14"
+clap = { version = "4.5.54", features = ["derive"] }
+clap_complete = "4.5.38"
+encoding_rs = "0.8"
+chardetng = "0.1"
+globset = "0.4.15"
+memchr = "2.7.6"
+mimalloc = { version = "0.1", default-features = false }
+memmap2 = "0.9.9"
+rayon = "1.11.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+walkdir = "2.5.0"
+
+[dev-dependencies]
+tempfile = "3"
