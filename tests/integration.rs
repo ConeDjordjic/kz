@@ -328,6 +328,67 @@ mod special_cases {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("21"));
     }
+
+    fn assert_max_line_length(contents: &[u8], expected: usize) {
+        let dir = create_temp_dir();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, contents).unwrap();
+
+        let output = kz_cmd().arg("-L").arg(&file).output().unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let got: usize = stdout.split_whitespace().next().unwrap().parse().unwrap();
+        assert_eq!(
+            got,
+            expected,
+            "input: {:?}",
+            String::from_utf8_lossy(contents)
+        );
+    }
+
+    #[test]
+    fn max_line_length_is_columns_not_bytes() {
+        assert_max_line_length("café naïve résumé\n".as_bytes(), 17);
+    }
+
+    #[test]
+    fn max_line_length_counts_wide_chars_as_two() {
+        assert_max_line_length("日本語のテキストです\n".as_bytes(), 20);
+        assert_max_line_length("ascii\n漢字\n".as_bytes(), 5);
+    }
+
+    #[test]
+    fn max_line_length_expands_tabs_to_eight_columns() {
+        assert_max_line_length(b"a\tb\n", 9);
+        assert_max_line_length(b"\t\n", 8);
+    }
+
+    #[test]
+    fn max_line_length_ignores_zero_width_chars() {
+        assert_max_line_length("e\u{301}\u{301}\u{301}x\n".as_bytes(), 2);
+        assert_max_line_length(b"ctrl\x01\x02chars\n", 9);
+    }
+
+    #[test]
+    fn max_line_length_ignores_invalid_utf8_bytes() {
+        assert_max_line_length(b"ab\xffcd\n", 4);
+        assert_max_line_length(b"\xff\xff\xff\xff\n", 0);
+    }
+
+    #[test]
+    fn max_line_length_restarts_at_carriage_return() {
+        assert_max_line_length(b"abc\rlonger-after-cr\n", 15);
+    }
+
+    #[test]
+    fn max_line_length_non_ascii_above_parallel_threshold() {
+        let mut contents = "日本語です\n".repeat(40_000);
+        assert!(contents.len() > 512 * 1024);
+        contents.push_str("café naïve résumé plus a tail\n");
+
+        assert_max_line_length(contents.as_bytes(), 29);
+    }
 }
 
 mod pattern_matching {

@@ -1,9 +1,6 @@
 mod config;
 mod count;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use encoding_rs::Encoding;
@@ -170,13 +167,7 @@ impl Counts {
 fn process_data(data: &[u8], args: &config::Args) -> Counts {
     let mut counts = Counts::new();
 
-    let needs_decoding = args.encoding.is_some()
-        || args.words
-        || args.chars
-        || args.unique
-        || args.stats
-        || args.code
-        || args.markdown;
+    let needs_decoding = args.encoding.is_some();
 
     let decoded_data;
     let data_after_encoding = if needs_decoding {
@@ -184,12 +175,10 @@ fn process_data(data: &[u8], args: &config::Args) -> Counts {
             if Encoding::for_label(name.as_bytes()).is_some() {
                 Some(name)
             } else {
-                if args.verbose {
-                    eprintln!(
-                        "kz: warning: unknown encoding '{}', falling back to auto-detection",
-                        name
-                    );
-                }
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    eprintln!("kz: warning: unknown encoding '{name}', reading input as UTF-8");
+                });
                 None
             }
         });
@@ -217,11 +206,7 @@ fn process_data(data: &[u8], args: &config::Args) -> Counts {
         counts.words = count::count_all_words(data_to_process);
     }
     if args.chars {
-        if args.fast {
-            counts.chars = data_to_process.len();
-        } else {
-            counts.chars = count::count_chars(data_to_process);
-        }
+        counts.chars = count::count_chars(data_to_process);
     }
     if args.bytes || args.stats {
         counts.bytes = data_to_process.len();
@@ -339,12 +324,68 @@ fn process_file(path: &str, args: &config::Args) -> io::Result<FileResult> {
     })
 }
 
+const STDIN_CHUNK: usize = 256 * 1024;
+
+fn stdin_is_streamable(args: &config::Args) -> bool {
+    (args.lines || args.bytes)
+        && !args.words
+        && !args.chars
+        && !args.max_line_length
+        && !args.blank_lines
+        && !args.unique
+        && !args.stats
+        && !args.histogram
+        && !args.code
+        && !args.markdown
+        && args.pattern.is_none()
+        && args.encoding.is_none()
+}
+
+fn stream_stdin(args: &config::Args) -> io::Result<Option<Counts>> {
+    let mut counts = Counts::new();
+    let mut buffer = vec![0u8; STDIN_CHUNK];
+    let mut stdin = io::stdin().lock();
+    let mut first = true;
+
+    loop {
+        let n = stdin.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        let chunk = &buffer[..n];
+
+        if first {
+            first = false;
+            if count::is_binary(chunk) {
+                eprintln!("kz: stdin: binary data detected, skipping");
+                return Ok(None);
+            }
+        }
+
+        if args.lines {
+            counts.lines += count::count_lines(chunk);
+        }
+        if args.bytes {
+            counts.bytes += n;
+        }
+    }
+
+    Ok(Some(counts))
+}
+
 fn process_stdin(args: &config::Args) -> io::Result<FileResult> {
     let start = if args.timing {
         Some(Instant::now())
     } else {
         None
     };
+
+    if stdin_is_streamable(args) {
+        return Ok(FileResult {
+            counts: stream_stdin(args)?.unwrap_or_else(Counts::new),
+            duration: start.map(|s| s.elapsed()),
+        });
+    }
 
     let mut buffer = Vec::new();
     io::stdin().read_to_end(&mut buffer)?;

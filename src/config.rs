@@ -65,9 +65,6 @@ pub struct Args {
     )]
     pub exclude: Vec<String>,
 
-    #[arg(long = "fast", help = "Skip UTF-8 validation for faster processing")]
-    pub fast: bool,
-
     #[arg(long = "histogram", help = "Show line length histogram")]
     pub histogram: bool,
 
@@ -95,7 +92,7 @@ pub struct Args {
     #[arg(
         long = "encoding",
         value_name = "ENCODING",
-        help = "Force input encoding (e.g., utf-8, iso-8859-1, shift_jis). Auto-detects if not specified"
+        help = "Decode input as ENCODING before counting (e.g. iso-8859-1, shift_jis). Without it, input is read as UTF-8, like wc"
     )]
     pub encoding: Option<String>,
 

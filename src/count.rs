@@ -2,6 +2,7 @@ use memchr::memmem::Finder;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use unicode_width::UnicodeWidthChar;
 
 const CHUNK_SIZE: usize = 1024 * 1024;
 const PARALLEL_THRESHOLD: usize = 512 * 1024;
@@ -219,21 +220,50 @@ pub fn count_chars(data: &[u8]) -> usize {
     }
 
     if data.len() < PARALLEL_THRESHOLD {
-        return std::str::from_utf8(data)
-            .map(|s| s.chars().count())
-            .unwrap_or(data.len());
+        return count_chars_chunk(data);
     }
 
     let chunk_boundaries = find_utf8_chunk_boundaries(data, CHUNK_SIZE);
     chunk_boundaries
         .par_windows(2)
-        .map(|window| {
-            let chunk = &data[window[0]..window[1]];
-            std::str::from_utf8(chunk)
-                .map(|s| s.chars().count())
-                .unwrap_or(chunk.len())
-        })
+        .map(|window| count_chars_chunk(&data[window[0]..window[1]]))
         .sum()
+}
+
+/// Characters in one chunk, matching `wc -m`: one per valid UTF-8 sequence,
+/// and nothing for a byte that is not part of one.
+///
+/// This must never fall back to counting bytes. An earlier version returned
+/// `data.len()` when the chunk failed to validate, which made `kz -m` disagree
+/// with `wc -m` on every input containing an invalid byte: `wc` decodes with
+/// `mbrtowc` and skips what will not decode, so `a\xe9b\n` is 3 characters to
+/// `wc` and was 4 to `kz`. Cross-checked against GNU coreutils 9.11.
+fn count_chars_chunk(data: &[u8]) -> usize {
+    let mut rest = data;
+    let mut count = 0;
+
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(valid) => return count + valid.chars().count(),
+            Err(e) => {
+                count += rest[..e.valid_up_to()]
+                    .iter()
+                    .filter(|&&b| !is_continuation(b))
+                    .count();
+                match e.error_len() {
+                    // One undecodable byte: skip it and resume after.
+                    Some(bad) => rest = &rest[e.valid_up_to() + bad..],
+                    // A sequence truncated by the end of input decodes to
+                    // nothing, which is what `wc` reports for it.
+                    None => return count,
+                }
+            }
+        }
+    }
+}
+
+fn is_continuation(b: u8) -> bool {
+    (b & 0xC0) == 0x80
 }
 
 pub fn max_line_length(data: &[u8]) -> usize {
@@ -258,23 +288,90 @@ fn max_line_length_chunk(data: &[u8]) -> usize {
     let mut prev = 0;
 
     for pos in memchr::memchr_iter(b'\n', data) {
-        let mut end = pos;
-        if end > prev && data[end - 1] == b'\r' {
-            end -= 1;
-        }
-        max_len = max_len.max(end - prev);
+        max_len = max_len.max(line_width(&data[prev..pos]));
         prev = pos + 1;
     }
 
     if prev < data.len() {
-        let mut end = data.len();
-        if end > prev && data[end - 1] == b'\r' {
-            end -= 1;
-        }
-        max_len = max_len.max(end - prev);
+        max_len = max_len.max(line_width(&data[prev..]));
     }
 
     max_len
+}
+
+fn line_width(line: &[u8]) -> usize {
+    if is_plain_ascii(line) {
+        return line.len();
+    }
+
+    match std::str::from_utf8(line) {
+        Ok(s) => {
+            let mut max = 0;
+            let mut width = 0;
+            for c in s.chars() {
+                if (c as u32).wrapping_sub(0x20) < 0x5f {
+                    width += 1;
+                    continue;
+                }
+                match c {
+                    '\r' | '\x0c' => {
+                        max = max.max(width);
+                        width = 0;
+                    }
+                    '\t' => width += 8 - (width % 8),
+                    _ => width += c.width().unwrap_or(0),
+                }
+            }
+            max.max(width)
+        }
+        Err(_) => invalid_utf8_line_width(line),
+    }
+}
+
+fn is_plain_ascii(line: &[u8]) -> bool {
+    line.iter().all(|&b| b.wrapping_sub(0x20) < 0x5f)
+}
+
+fn invalid_utf8_line_width(line: &[u8]) -> usize {
+    let mut max = 0;
+    let mut width = 0;
+    let mut i = 0;
+
+    while i < line.len() {
+        let b = line[i];
+
+        if b < 0x80 {
+            match b {
+                b'\r' | 0x0c => {
+                    max = max.max(width);
+                    width = 0;
+                }
+                b'\t' => width += 8 - (width % 8),
+                0x00..=0x1f | 0x7f => {}
+                _ => width += 1,
+            }
+            i += 1;
+            continue;
+        }
+
+        let seq_len = match b {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => 1,
+        };
+        let end = (i + seq_len).min(line.len());
+
+        match std::str::from_utf8(&line[i..end]) {
+            Ok(s) => {
+                width += s.chars().next().map_or(0, |c| c.width().unwrap_or(0));
+                i = end;
+            }
+            Err(_) => i += 1,
+        }
+    }
+
+    max.max(width)
 }
 
 pub fn is_binary(data: &[u8]) -> bool {
@@ -414,20 +511,12 @@ fn collect_line_lengths_chunk(data: &[u8]) -> Vec<usize> {
     let mut prev = 0;
 
     for pos in memchr::memchr_iter(b'\n', data) {
-        let mut end = pos;
-        if end > prev && data[end - 1] == b'\r' {
-            end -= 1;
-        }
-        lengths.push(end - prev);
+        lengths.push(line_width(&data[prev..pos]));
         prev = pos + 1;
     }
 
     if prev < data.len() {
-        let mut end = data.len();
-        if end > prev && data[end - 1] == b'\r' {
-            end -= 1;
-        }
-        lengths.push(end - prev);
+        lengths.push(line_width(&data[prev..]));
     }
 
     lengths
@@ -464,21 +553,13 @@ fn generate_histogram_chunk(data: &[u8]) -> HashMap<usize, usize> {
     let mut prev = 0;
 
     for pos in memchr::memchr_iter(b'\n', data) {
-        let mut end = pos;
-        if end > prev && data[end - 1] == b'\r' {
-            end -= 1;
-        }
-        let bucket = ((end - prev) / 10) * 10;
+        let bucket = (line_width(&data[prev..pos]) / 10) * 10;
         *histogram.entry(bucket).or_insert(0) += 1;
         prev = pos + 1;
     }
 
     if prev < data.len() {
-        let mut end = data.len();
-        if end > prev && data[end - 1] == b'\r' {
-            end -= 1;
-        }
-        let bucket = ((end - prev) / 10) * 10;
+        let bucket = (line_width(&data[prev..]) / 10) * 10;
         *histogram.entry(bucket).or_insert(0) += 1;
     }
 
@@ -648,15 +729,11 @@ fn filter_inline_code(line: &str) -> String {
 }
 
 pub fn decode_to_utf8<'a>(data: &'a [u8], encoding_name: Option<&str>) -> Cow<'a, [u8]> {
-    use chardetng::EncodingDetector;
     use encoding_rs::Encoding;
 
-    let encoding = if let Some(name) = encoding_name {
-        Encoding::for_label(name.as_bytes()).unwrap_or(encoding_rs::UTF_8)
-    } else {
-        let mut detector = EncodingDetector::new();
-        detector.feed(data, true);
-        detector.guess(None, true)
+    let encoding = match encoding_name {
+        Some(name) => Encoding::for_label(name.as_bytes()).unwrap_or(encoding_rs::UTF_8),
+        None => return Cow::Borrowed(data),
     };
 
     if encoding == encoding_rs::UTF_8 {
@@ -861,6 +938,29 @@ mod tests {
     }
 
     #[test]
+    fn test_max_line_length_is_display_width() {
+        assert_eq!(max_line_length("café naïve résumé\n".as_bytes()), 17);
+
+        assert_eq!(max_line_length("日本語\n".as_bytes()), 6);
+
+        assert_eq!(max_line_length("e\u{301}\n".as_bytes()), 1);
+        assert_eq!(max_line_length(b"a\x01b\n"), 2);
+    }
+
+    #[test]
+    fn test_max_line_length_tabs_expand_to_eight() {
+        assert_eq!(max_line_length(b"\t\n"), 8);
+        assert_eq!(max_line_length(b"a\tb\n"), 9);
+        assert_eq!(max_line_length(b"12345678\tx\n"), 17);
+    }
+
+    #[test]
+    fn test_max_line_length_invalid_utf8_is_zero_width() {
+        assert_eq!(max_line_length(b"ab\xffcd\n"), 4);
+        assert_eq!(max_line_length(b"\xff\xff\n"), 0);
+    }
+
+    #[test]
     fn test_filter_code_c_style_single_line() {
         let input = b"// this is a comment\nint x = 5;\n";
         let output = filter_code_comments(input);
@@ -986,5 +1086,89 @@ mod tests {
         let input = "hello 世界".as_bytes();
         let output = decode_to_utf8(input, None);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_decode_utf8_is_not_copied() {
+        let input = "hello 世界, a long enough line to be worth borrowing".as_bytes();
+        assert!(matches!(decode_to_utf8(input, None), Cow::Borrowed(_)));
+    }
+
+    fn legacy_bytes(encoding: &'static encoding_rs::Encoding, text: &str) -> Vec<u8> {
+        let (body, _, _) = encoding.encode(text);
+        body.into_owned()
+    }
+
+    #[test]
+    fn test_no_encoding_detection_on_legacy_input() {
+        for (encoding, text) in [
+            (
+                encoding_rs::SHIFT_JIS,
+                "日本語のテキストです。\n".repeat(200),
+            ),
+            (encoding_rs::GBK, "这是一个测试文件。\n".repeat(200)),
+            (encoding_rs::BIG5, "這是一個測試檔案。\n".repeat(200)),
+        ] {
+            let data = legacy_bytes(encoding, &text);
+            let out = decode_to_utf8(&data, None);
+            assert!(matches!(out, Cow::Borrowed(_)));
+            assert_eq!(&out[..], &data[..]);
+        }
+    }
+
+    #[test]
+    fn test_no_encoding_detection_after_long_ascii_prefix() {
+        let text = "日本語のテキストです。\n".repeat(200);
+
+        for prefix_len in [255 * 1024, 260 * 1024, 400_000, 1024 * 1024] {
+            let mut data = vec![b'a'; prefix_len];
+            data.push(b'\n');
+            data.extend_from_slice(&legacy_bytes(encoding_rs::SHIFT_JIS, &text));
+
+            let out = decode_to_utf8(&data, None);
+            assert!(
+                matches!(out, Cow::Borrowed(_)),
+                "decoded a {prefix_len}-byte-prefixed file without being asked"
+            );
+            assert_eq!(&out[..], &data[..]);
+        }
+    }
+
+    #[test]
+    fn test_explicit_encoding_decodes() {
+        let text = "日本語のテキストです。\n".repeat(200);
+        let data = legacy_bytes(encoding_rs::SHIFT_JIS, &text);
+
+        let out = decode_to_utf8(&data, Some("shift_jis"));
+        assert!(matches!(out, Cow::Owned(_)));
+        assert_eq!(count_chars(&out), text.chars().count());
+    }
+
+    #[test]
+    fn test_count_chars_matches_wc_on_invalid_utf8() {
+        assert_eq!(count_chars(b"a\xc3\xa9b\n"), 4);
+        assert_eq!(count_chars(b"a\xe9b\n"), 3);
+        assert_eq!(count_chars(b"a\xff\xfeb\n"), 3);
+        assert_eq!(count_chars(b"a\xc3\n"), 2);
+        assert_eq!(count_chars(b"a\xc3"), 1);
+        assert_eq!(count_chars(b"\xff\xff\xff"), 0);
+    }
+
+    #[test]
+    fn test_count_chars_invalid_utf8_above_parallel_threshold() {
+        let mut data = Vec::new();
+        while data.len() < PARALLEL_THRESHOLD * 3 {
+            data.extend_from_slice("café 日本語 ".as_bytes());
+            data.extend_from_slice(b"\xff\xc3");
+            data.push(b'\n');
+        }
+
+        let serial: usize = data
+            .split(|&b| b == b'\n')
+            .map(|line| count_chars_chunk(line))
+            .sum::<usize>()
+            + data.iter().filter(|&&b| b == b'\n').count();
+
+        assert_eq!(count_chars(&data), serial);
     }
 }

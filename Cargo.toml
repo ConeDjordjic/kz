@@ -28,15 +28,14 @@ atty = "0.2.14"
 clap = { version = "4.5.54", features = ["derive"] }
 clap_complete = "4.5.38"
 encoding_rs = "0.8"
-chardetng = "0.1"
 globset = "0.4.15"
 memchr = "2.7.6"
-mimalloc = { version = "0.1", default-features = false }
 memmap2 = "0.9.9"
 rayon = "1.11.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 walkdir = "2.5.0"
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
