@@ -60,7 +60,7 @@ Two things worth stating plainly:
 | CPU | AMD Ryzen 7 7800X3D, 8 cores / 16 threads |
 | OS | Linux 7.2.6-zen2 x86_64 |
 | `wc` | GNU coreutils 9.11 |
-| `kz` | 0.1.0 (release, `lto = "fat"`, `codegen-units = 1`) |
+| `kz` | 0.2.0 (release, `lto = "fat"`, `codegen-units = 1`) |
 
 ## Results
 
